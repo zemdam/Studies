@@ -1,0 +1,661 @@
+diff -rupNEZbB source/usr/src/include/unistd.h minix_rozw/usr/src/include/unistd.h
+--- source/usr/src/include/unistd.h	2014-09-13 23:56:50.000000000 +0200
++++ minix_rozw/usr/src/include/unistd.h	2023-06-04 23:21:17.717123897 +0200
+@@ -69,6 +69,7 @@
+ #include <sys/featuretest.h>
+ #include <sys/types.h>
+ #include <sys/unistd.h>
++#include <stdbool.h>
+ 
+ #if _FORTIFY_SOURCE > 0
+ #include <ssp/unistd.h>
+@@ -85,6 +86,7 @@
+ 
+ __BEGIN_DECLS
+ __dead	 void _exit(int);
++int sched_deadline(int64_t deadline, int64_t estimate, bool kill);
+ int	 access(const char *, int);
+ unsigned int alarm(unsigned int);
+ int	 chdir(const char *);
+diff -rupNEZbB source/usr/src/lib/libc/misc/Makefile.inc minix_rozw/usr/src/lib/libc/misc/Makefile.inc
+--- source/usr/src/lib/libc/misc/Makefile.inc	2014-09-13 23:56:50.000000000 +0200
++++ minix_rozw/usr/src/lib/libc/misc/Makefile.inc	2023-06-04 23:21:17.745124732 +0200
+@@ -7,4 +7,4 @@
+ SRCS+=	initfini.c
+ 
+ # for -fstack-protector
+-SRCS+=	stack_protector.c
++SRCS+=	stack_protector.c sched_deadline.c
+diff -rupNEZbB source/usr/src/lib/libc/misc/sched_deadline.c minix_rozw/usr/src/lib/libc/misc/sched_deadline.c
+--- source/usr/src/lib/libc/misc/sched_deadline.c	1970-01-01 01:00:00.000000000 +0100
++++ minix_rozw/usr/src/lib/libc/misc/sched_deadline.c	2023-06-04 23:21:17.745124732 +0200
+@@ -0,0 +1,25 @@
++#include <lib.h>
++#include <minix/rs.h>
++#include <stdio.h>
++
++int get_ipc_endpt(endpoint_t *pt)
++{
++        return minix_rs_lookup("pm", pt);
++}
++
++int sched_deadline(int64_t deadline, int64_t estimate, bool kill)
++{
++    message m;
++    endpoint_t sched_pt;
++
++    if (get_ipc_endpt(&sched_pt)) {
++        errno = ENOSYS;
++        return -1;
++    }
++
++    m.m_deadline.deadline = deadline;
++    m.m_deadline.estimate = estimate;
++    m.m_deadline.kill = kill;
++
++    return _syscall(sched_pt, PM_DEADLINE, &m);
++}
+\ No newline at end of file
+diff -rupNEZbB source/usr/src/minix/include/minix/callnr.h minix_rozw/usr/src/minix/include/minix/callnr.h
+--- source/usr/src/minix/include/minix/callnr.h	2014-09-13 23:56:50.000000000 +0200
++++ minix_rozw/usr/src/minix/include/minix/callnr.h	2023-06-04 23:21:17.909129626 +0200
+@@ -58,8 +58,9 @@
+ #define PM_GETEPINFO		(PM_BASE + 45)
+ #define PM_GETPROCNR		(PM_BASE + 46)
+ #define PM_GETSYSINFO		(PM_BASE + 47)
++#define PM_DEADLINE         (PM_BASE + 48)
+ 
+-#define NR_PM_CALLS		48	/* highest number from base plus one */
++#define NR_PM_CALLS		49	/* highest number from base plus one */
+ 
+ /*===========================================================================*
+  *				Calls to VFS				     *
+diff -rupNEZbB source/usr/src/minix/include/minix/com.h minix_rozw/usr/src/minix/include/minix/com.h
+--- source/usr/src/minix/include/minix/com.h	2014-09-13 23:56:50.000000000 +0200
++++ minix_rozw/usr/src/minix/include/minix/com.h	2023-06-04 23:21:17.909129626 +0200
+@@ -763,6 +763,7 @@
+ #define SCHEDULING_STOP		(SCHEDULING_BASE+3)
+ #define SCHEDULING_SET_NICE	(SCHEDULING_BASE+4)
+ #define SCHEDULING_INHERIT	(SCHEDULING_BASE+5)
++#define SCHEDULING_DEADLINE (SCHEDULING_BASE+6)
+ 
+ /*===========================================================================*
+  *              Messages for USB                                             *
+diff -rupNEZbB source/usr/src/minix/include/minix/config.h minix_rozw/usr/src/minix/include/minix/config.h
+--- source/usr/src/minix/include/minix/config.h	2014-09-13 23:56:50.000000000 +0200
++++ minix_rozw/usr/src/minix/include/minix/config.h	2023-06-04 23:21:17.909129626 +0200
+@@ -66,6 +66,8 @@
+ 						(should correspond to nice 0) */
+ #define MIN_USER_Q	  (NR_SCHED_QUEUES - 1)	/* minimum priority for user
+ 						   processes */
++#define DEADLINE_Q 8
++#define PENALTY_Q 14
+ /* default scheduling quanta */
+ #define USER_QUANTUM 200
+ 
+diff -rupNEZbB source/usr/src/minix/include/minix/ipc.h minix_rozw/usr/src/minix/include/minix/ipc.h
+--- source/usr/src/minix/include/minix/ipc.h	2014-09-13 23:56:50.000000000 +0200
++++ minix_rozw/usr/src/minix/include/minix/ipc.h	2023-06-04 23:21:17.909129626 +0200
+@@ -6,6 +6,7 @@
+ #include <minix/const.h>
+ #include <sys/signal.h>
+ #include <sys/types.h>
++#include <stdbool.h>
+ 
+ /*==========================================================================* 
+  * Types relating to messages. 						    *
+@@ -14,6 +15,16 @@
+ #define M_PATH_STRING_MAX  40
+ 
+ typedef struct {
++	int64_t deadline;
++	int64_t estimate;
++	endpoint_t endpoint;
++	bool kill;
++
++	uint8_t padding[35];
++} mess_deadline;
++_ASSERT_MSG_SIZE(mess_deadline);
++
++typedef struct {
+ 	uint8_t data[56];
+ } mess_u8;
+ _ASSERT_MSG_SIZE(mess_u8);
+@@ -988,8 +999,10 @@ typedef struct {
+ 	int quantum;
+ 	int priority;
+ 	int cpu;
++	int64_t deadline;
++	int64_t estimate;
+ 
+-	uint8_t padding[40];
++	uint8_t padding[24];
+ } mess_lsys_krn_schedule;
+ _ASSERT_MSG_SIZE(mess_lsys_krn_schedule);
+ 
+@@ -2027,6 +2040,8 @@ typedef struct {
+ 	endpoint_t m_source;		/* who sent the message */
+ 	int m_type;			/* what kind of message is it */
+ 	union {
++		mess_deadline m_deadline;
++
+ 		mess_u8			m_u8;
+ 		mess_u16		m_u16;
+ 		mess_u32		m_u32;
+diff -rupNEZbB source/usr/src/minix/include/minix/syslib.h minix_rozw/usr/src/minix/include/minix/syslib.h
+--- source/usr/src/minix/include/minix/syslib.h	2014-09-13 23:56:50.000000000 +0200
++++ minix_rozw/usr/src/minix/include/minix/syslib.h	2023-06-04 23:21:17.909129626 +0200
+@@ -38,7 +38,7 @@ int sys_exit(void);
+ int sys_trace(int req, endpoint_t proc_ep, long addr, long *data_p);
+ 
+ int sys_schedule(endpoint_t proc_ep, int priority, int quantum, int
+-	cpu);
++	cpu, int64_t deadline, int64_t estimate);
+ int sys_schedctl(unsigned flags, endpoint_t proc_ep, int priority, int
+ 	quantum, int cpu);
+ 
+diff -rupNEZbB source/usr/src/minix/kernel/proc.c minix_rozw/usr/src/minix/kernel/proc.c
+--- source/usr/src/minix/kernel/proc.c	2014-09-13 23:56:50.000000000 +0200
++++ minix_rozw/usr/src/minix/kernel/proc.c	2023-06-04 23:21:17.913129746 +0200
+@@ -1537,6 +1537,9 @@ void enqueue(
+  */
+   int q = rp->p_priority;	 		/* scheduling queue to use */
+   struct proc **rdy_head, **rdy_tail;
++  bool found = false;
++  int64_t free_time;
++  int64_t sum = 0;
+   
+   assert(proc_is_runnable(rp));
+ 
+@@ -1545,6 +1548,86 @@ void enqueue(
+   rdy_head = get_cpu_var(rp->p_cpu, run_q_head);
+   rdy_tail = get_cpu_var(rp->p_cpu, run_q_tail);
+ 
++  int64_t now = (((int64_t) get_realtime() * 1000) / system_hz) + ((int64_t) boottime) * 1000;
++  if (q == DEADLINE_Q) {
++	if (!rdy_head[q]) {
++	  rdy_head[q] = rdy_tail[q] = rp; 		/* create a new queue */
++      rp->p_nextready = NULL;		/* mark new end */
++	} else {
++		struct proc *start = rdy_head[q];
++		struct proc *next = rdy_head[q];
++		struct proc *prev = NULL;
++		// Temporary revert queue.
++		while (next != NULL) {
++			start = next;
++			start->total_time = sum + now + start->estimate;
++			sum += start->estimate;
++			next = start->p_nextready;
++			start->p_nextready = prev;
++			prev = start;
++		}
++
++		// Check if can finish at last place.
++		if (rp->estimate + sum + now <= rp->deadline) {
++			rp->p_nextready = rdy_tail[q];	
++      		rdy_tail[q] = rp;
++			found = true;
++		}
++
++		// Check for place when can finish and does not make other not finish.
++		start = rdy_tail[q];
++		while (start != NULL && !found) {
++			sum -= start->estimate;
++			free_time = start->deadline - start->total_time;
++			if (free_time >= 0 && free_time < rp->estimate) {
++				break;
++			}
++			if (rp->estimate + sum + now <= rp->deadline) {
++				rp->p_nextready = start->p_nextready;
++				start->p_nextready = rp;
++				found = true;
++				break;
++			}
++			start = start->p_nextready;
++		}
++
++		// Check for place where can estimate is sorted and does not make other not finish.
++		start = rdy_tail[q];
++		while (start->p_nextready != NULL && !found) {
++			free_time = start->deadline - start->total_time;
++			if (free_time >= 0 && free_time < rp->estimate) {
++				break;
++			}
++			if (start->estimate >= rp->estimate && start->p_nextready->estimate <= rp->estimate) {
++				rp->p_nextready = start->p_nextready;
++				start->p_nextready = rp;
++				found = true;
++				break;
++			}
++			start = start->p_nextready;
++		}
++
++		// If did not find place put at the end.
++		if (!found) {
++			rp->p_nextready = rdy_tail[q];
++      		rdy_tail[q] = rp;
++			found = true;
++		}
++
++		// Revert for correct order.
++		start = rdy_tail[q];
++		prev = NULL;
++		next = rdy_tail[q];
++		while (next != NULL) {
++			start = next;
++			next = start->p_nextready;
++			start->p_nextready = prev;
++			prev = start;
++		}
++
++		rdy_head[q] = start; // Head could be changed so it is better to update just in case.
++	}
++  } else {
+   /* Now add the process to the queue. */
+   if (!rdy_head[q]) {		/* add to empty queue */
+       rdy_head[q] = rdy_tail[q] = rp; 		/* create a new queue */
+@@ -1555,6 +1638,7 @@ void enqueue(
+       rdy_tail[q] = rp;				/* set new queue tail */
+       rp->p_nextready = NULL;		/* mark new end */
+   }
++  }
+ 
+   if (cpuid == rp->p_cpu) {
+ 	  /*
+diff -rupNEZbB source/usr/src/minix/kernel/proc.h minix_rozw/usr/src/minix/kernel/proc.h
+--- source/usr/src/minix/kernel/proc.h	2014-09-13 23:56:50.000000000 +0200
++++ minix_rozw/usr/src/minix/kernel/proc.h	2023-06-04 23:21:17.913129746 +0200
+@@ -131,6 +131,9 @@ struct proc {
+ #if DEBUG_TRACE
+   int p_schedules;
+ #endif
++  int64_t deadline;
++  int64_t estimate;
++  int64_t total_time;
+ };
+ 
+ #endif /* __ASSEMBLY__ */
+diff -rupNEZbB source/usr/src/minix/kernel/procoffsets.h minix_rozw/usr/src/minix/kernel/procoffsets.h
+--- source/usr/src/minix/kernel/procoffsets.h	2016-11-18 21:46:22.000000000 +0100
++++ minix_rozw/usr/src/minix/kernel/procoffsets.h	2023-06-04 23:21:17.913129746 +0200
+@@ -1,4 +1,4 @@
+-#define proc_SIZEOF 528
++#define proc_SIZEOF 552
+ #define DIREG 8
+ #define SIREG 12
+ #define BPREG 16
+diff -rupNEZbB source/usr/src/minix/kernel/proto.h minix_rozw/usr/src/minix/kernel/proto.h
+--- source/usr/src/minix/kernel/proto.h	2014-09-13 23:56:50.000000000 +0200
++++ minix_rozw/usr/src/minix/kernel/proto.h	2023-06-04 23:21:17.913129746 +0200
+@@ -99,7 +99,7 @@ void system_init(void);
+ void clear_endpoint(struct proc *rc);
+ void clear_ipc_refs(struct proc *rc, int caller_ret);
+ void kernel_call_resume(struct proc *p);
+-int sched_proc(struct proc *rp, int priority, int quantum, int cpu);
++int sched_proc(struct proc *rp, int priority, int quantum, int cpu, int64_t deadline, int64_t estimate);
+ 
+ /* system/do_vtimer.c */
+ void vtimer_check(struct proc *rp);
+diff -rupNEZbB source/usr/src/minix/kernel/system/do_schedctl.c minix_rozw/usr/src/minix/kernel/system/do_schedctl.c
+--- source/usr/src/minix/kernel/system/do_schedctl.c	2014-09-13 23:56:50.000000000 +0200
++++ minix_rozw/usr/src/minix/kernel/system/do_schedctl.c	2023-06-04 23:21:17.913129746 +0200
+@@ -34,7 +34,7 @@ int do_schedctl(struct proc * caller, me
+ 		cpu = m_ptr->m_lsys_krn_schedctl.cpu;
+ 
+ 		/* Try to schedule the process. */
+-		if((r = sched_proc(p, priority, quantum, cpu) != OK))
++		if((r = sched_proc(p, priority, quantum, cpu, 0, 0) != OK))
+ 			return r;
+ 		p->p_scheduler = NULL;
+ 	} else {
+diff -rupNEZbB source/usr/src/minix/kernel/system/do_schedule.c minix_rozw/usr/src/minix/kernel/system/do_schedule.c
+--- source/usr/src/minix/kernel/system/do_schedule.c	2014-09-13 23:56:50.000000000 +0200
++++ minix_rozw/usr/src/minix/kernel/system/do_schedule.c	2023-06-04 23:21:17.913129746 +0200
+@@ -10,6 +10,7 @@ int do_schedule(struct proc * caller, me
+ 	struct proc *p;
+ 	int proc_nr;
+ 	int priority, quantum, cpu;
++	int64_t deadline, estimate;
+ 
+ 	if (!isokendpt(m_ptr->m_lsys_krn_schedule.endpoint, &proc_nr))
+ 		return EINVAL;
+@@ -24,6 +25,8 @@ int do_schedule(struct proc * caller, me
+ 	priority = m_ptr->m_lsys_krn_schedule.priority;
+ 	quantum = m_ptr->m_lsys_krn_schedule.quantum;
+ 	cpu = m_ptr->m_lsys_krn_schedule.cpu;
++	deadline = m_ptr->m_lsys_krn_schedule.deadline;
++	estimate = m_ptr->m_lsys_krn_schedule.estimate;
+ 
+-	return sched_proc(p, priority, quantum, cpu);
++	return sched_proc(p, priority, quantum, cpu, deadline, estimate);
+ }
+diff -rupNEZbB source/usr/src/minix/kernel/system.c minix_rozw/usr/src/minix/kernel/system.c
+--- source/usr/src/minix/kernel/system.c	2014-09-13 23:56:50.000000000 +0200
++++ minix_rozw/usr/src/minix/kernel/system.c	2023-06-04 23:21:17.913129746 +0200
+@@ -621,7 +621,7 @@ void kernel_call_resume(struct proc *cal
+ int sched_proc(struct proc *p,
+ 			int priority,
+ 			int quantum,
+-			int cpu)
++			int cpu, int64_t deadline, int64_t estimate)
+ {
+ 	/* Make sure the values given are within the allowed range.*/
+ 	if ((priority < TASK_Q && priority != -1) || priority > NR_SCHED_QUEUES)
+@@ -630,6 +630,12 @@ int sched_proc(struct proc *p,
+ 	if (quantum < 1 && quantum != -1)
+ 		return(EINVAL);
+ 
++  // Check if deadline has passed.
++  int64_t now = (((int64_t) get_realtime() * 1000) / system_hz) + ((int64_t) boottime) * 1000;
++  if (priority == DEADLINE_Q && deadline < now) {
++    return(EINVAL);
++  }
++
+ #ifdef CONFIG_SMP
+ 	if ((cpu < 0 && cpu != -1) || (cpu > 0 && (unsigned) cpu >= ncpus))
+ 		return(EINVAL);
+@@ -665,6 +671,8 @@ int sched_proc(struct proc *p,
+ 		p->p_quantum_size_ms = quantum;
+ 		p->p_cpu_time_left = ms_2_cpu_time(quantum);
+ 	}
++  p->deadline = deadline;
++  p->estimate = estimate;
+ #ifdef CONFIG_SMP
+ 	if (cpu != -1)
+ 		p->p_cpu = cpu;
+diff -rupNEZbB source/usr/src/minix/lib/libsys/sys_schedule.c minix_rozw/usr/src/minix/lib/libsys/sys_schedule.c
+--- source/usr/src/minix/lib/libsys/sys_schedule.c	2014-09-13 23:56:50.000000000 +0200
++++ minix_rozw/usr/src/minix/lib/libsys/sys_schedule.c	2023-06-04 23:21:17.941130581 +0200
+@@ -3,7 +3,7 @@
+ int sys_schedule(endpoint_t proc_ep,
+ 			int priority,
+ 			int quantum,
+-			int cpu)
++			int cpu, int64_t deadline, int64_t estimate)
+ {
+ 	message m;
+ 
+@@ -11,5 +11,8 @@ int sys_schedule(endpoint_t proc_ep,
+ 	m.m_lsys_krn_schedule.priority = priority;
+ 	m.m_lsys_krn_schedule.quantum  = quantum;
+ 	m.m_lsys_krn_schedule.cpu = cpu;
++	m.m_lsys_krn_schedule.deadline = deadline;
++	m.m_lsys_krn_schedule.estimate = estimate;
++
+ 	return(_kernel_call(SYS_SCHEDULE, &m));
+ }
+diff -rupNEZbB source/usr/src/minix/servers/pm/misc.c minix_rozw/usr/src/minix/servers/pm/misc.c
+--- source/usr/src/minix/servers/pm/misc.c	2014-09-13 23:56:50.000000000 +0200
++++ minix_rozw/usr/src/minix/servers/pm/misc.c	2023-06-04 23:21:17.949130820 +0200
+@@ -426,3 +426,17 @@ int do_getrusage()
+ 	return sys_datacopy(SELF, (vir_bytes)&r_usage, who_e,
+ 		m_in.m_lc_pm_rusage.addr, (vir_bytes) sizeof(r_usage));
+ }
++
++/*===========================================================================*
++ *				call_sched_deadline				     *
++ *===========================================================================*/
++int call_sched_deadline()
++{
++  if (mp->mp_scheduler == KERNEL || mp->mp_scheduler == NONE) {
++		return (EINVAL);
++  }
++  
++  message m = m_in;
++  m.m_deadline.endpoint = m_in.m_source;
++  return _taskcall(mp->mp_scheduler, SCHEDULING_DEADLINE, &m);
++}
+\ No newline at end of file
+diff -rupNEZbB source/usr/src/minix/servers/pm/proto.h minix_rozw/usr/src/minix/servers/pm/proto.h
+--- source/usr/src/minix/servers/pm/proto.h	2014-09-13 23:56:50.000000000 +0200
++++ minix_rozw/usr/src/minix/servers/pm/proto.h	2023-06-04 23:21:17.949130820 +0200
+@@ -46,6 +46,7 @@ int do_getepinfo(void);
+ int do_svrctl(void);
+ int do_getsetpriority(void);
+ int do_getrusage(void);
++int call_sched_deadline(void);
+ 
+ /* schedule.c */
+ void sched_init(void);
+diff -rupNEZbB source/usr/src/minix/servers/pm/table.c minix_rozw/usr/src/minix/servers/pm/table.c
+--- source/usr/src/minix/servers/pm/table.c	2014-09-13 23:56:50.000000000 +0200
++++ minix_rozw/usr/src/minix/servers/pm/table.c	2023-06-04 23:21:17.949130820 +0200
+@@ -58,5 +58,6 @@ int (* const call_vec[NR_PM_CALLS])(void
+ 	CALL(PM_EXEC_RESTART)	= do_execrestart,
+ 	CALL(PM_GETEPINFO)	= do_getepinfo,		/* getepinfo(2) */
+ 	CALL(PM_GETPROCNR)	= do_getprocnr,		/* getprocnr(2) */
+-	CALL(PM_GETSYSINFO)	= do_getsysinfo		/* getsysinfo(2) */
++	CALL(PM_GETSYSINFO)	= do_getsysinfo,		/* getsysinfo(2) */
++	CALL(PM_DEADLINE) = call_sched_deadline
+ };
+diff -rupNEZbB source/usr/src/minix/servers/sched/main.c minix_rozw/usr/src/minix/servers/sched/main.c
+--- source/usr/src/minix/servers/sched/main.c	2014-09-13 23:56:50.000000000 +0200
++++ minix_rozw/usr/src/minix/servers/sched/main.c	2023-06-04 23:21:17.953130939 +0200
+@@ -87,6 +87,9 @@ int main(void)
+ 				result = EPERM;
+ 			}
+ 			break;
++		case SCHEDULING_DEADLINE:
++			result = do_sched_deadline(&m_in);
++			break;
+ 		default:
+ 			result = no_sys(who_e, call_nr);
+ 		}
+diff -rupNEZbB source/usr/src/minix/servers/sched/proto.h minix_rozw/usr/src/minix/servers/sched/proto.h
+--- source/usr/src/minix/servers/sched/proto.h	2014-09-13 23:56:50.000000000 +0200
++++ minix_rozw/usr/src/minix/servers/sched/proto.h	2023-06-04 23:21:17.953130939 +0200
+@@ -12,6 +12,7 @@ int do_noquantum(message *m_ptr);
+ int do_start_scheduling(message *m_ptr);
+ int do_stop_scheduling(message *m_ptr);
+ int do_nice(message *m_ptr);
++int do_sched_deadline(message *m_ptr);
+ void init_scheduling(void);
+ 
+ /* utility.c */
+diff -rupNEZbB source/usr/src/minix/servers/sched/schedproc.h minix_rozw/usr/src/minix/servers/sched/schedproc.h
+--- source/usr/src/minix/servers/sched/schedproc.h	2014-09-13 23:56:50.000000000 +0200
++++ minix_rozw/usr/src/minix/servers/sched/schedproc.h	2023-06-04 23:21:17.953130939 +0200
+@@ -4,6 +4,7 @@
+ #include <limits.h>
+ 
+ #include <minix/bitmap.h>
++#include <stdbool.h>
+ 
+ /* EXTERN should be extern except in main.c, where we want to keep the struct */
+ #ifdef _MAIN
+@@ -33,6 +34,10 @@ EXTERN struct schedproc {
+ 	bitchunk_t cpu_mask[BITMAP_CHUNKS(CONFIG_MAX_CPUS)]; /* what CPUs is the
+ 								process allowed
+ 								to run on */
++	int64_t deadline;
++	int64_t estimate;
++	bool kill;
++	bool is_deadline;
+ } schedproc[NR_PROCS];
+ 
+ /* Flag values */
+diff -rupNEZbB source/usr/src/minix/servers/sched/schedule.c minix_rozw/usr/src/minix/servers/sched/schedule.c
+--- source/usr/src/minix/servers/sched/schedule.c	2014-09-13 23:56:50.000000000 +0200
++++ minix_rozw/usr/src/minix/servers/sched/schedule.c	2023-06-04 23:21:17.953130939 +0200
+@@ -13,6 +13,7 @@
+ #include <minix/com.h>
+ #include <machine/archtypes.h>
+ #include "kernel/proc.h" /* for queue constants */
++#include <sys/time.h>
+ 
+ static minix_timer_t sched_timer;
+ static unsigned balance_timeout;
+@@ -99,8 +100,25 @@ int do_noquantum(message *m_ptr)
+ 	}
+ 
+ 	rmp = &schedproc[proc_nr_n];
+-	if (rmp->priority < MIN_USER_Q) {
++	if (rmp->priority == DEADLINE_Q && !rmp->is_deadline) {
++		panic("Should not be on DEADLINE_Q");
++	}
++
++	if (rmp->is_deadline) {
++		rmp->estimate -= rmp->time_slice;
++		if (rmp->estimate <= 0) {
++			if (rmp->kill) {
++				return sys_kill(rmp->endpoint, SIGKILL);
++			} else {
++				rmp->priority = PENALTY_Q;
++				rmp->is_deadline = false;
++			}
++		}
++	} else if (rmp->priority < MIN_USER_Q) {
+ 		rmp->priority += 1; /* lower priority */
++		if (rmp->priority == DEADLINE_Q) {
++			rmp->priority = DEADLINE_Q + 1;
++		}
+ 	}
+ 
+ 	if ((rv = schedule_process_local(rmp)) != OK) {
+@@ -164,6 +182,10 @@ int do_start_scheduling(message *m_ptr)
+ 	rmp->endpoint     = m_ptr->m_lsys_sched_scheduling_start.endpoint;
+ 	rmp->parent       = m_ptr->m_lsys_sched_scheduling_start.parent;
+ 	rmp->max_priority = m_ptr->m_lsys_sched_scheduling_start.maxprio;
++	rmp->is_deadline = false;
++	if (rmp->max_priority == DEADLINE_Q) {
++		rmp->max_priority = DEADLINE_Q - 1;
++	}
+ 	if (rmp->max_priority >= NR_SCHED_QUEUES) {
+ 		return EINVAL;
+ 	}
+@@ -175,6 +197,9 @@ int do_start_scheduling(message *m_ptr)
+ 		/* We have a special case here for init, which is the first
+ 		   process scheduled, and the parent of itself. */
+ 		rmp->priority   = USER_Q;
++		if (rmp->priority == DEADLINE_Q) {
++			rmp->priority = DEADLINE_Q - 1;
++		}
+ 		rmp->time_slice = DEFAULT_USER_TIME_SLICE;
+ 
+ 		/*
+@@ -195,6 +220,9 @@ int do_start_scheduling(message *m_ptr)
+ 		/* We have a special case here for system processes, for which
+ 		 * quanum and priority are set explicitly rather than inherited 
+ 		 * from the parent */
++		if (rmp->max_priority == DEADLINE_Q) {
++			rmp->max_priority = DEADLINE_Q - 1;
++		}
+ 		rmp->priority   = rmp->max_priority;
+ 		rmp->time_slice = m_ptr->m_lsys_sched_scheduling_start.quantum;
+ 		break;
+@@ -209,6 +237,10 @@ int do_start_scheduling(message *m_ptr)
+ 
+ 		rmp->priority = schedproc[parent_nr_n].priority;
+ 		rmp->time_slice = schedproc[parent_nr_n].time_slice;
++		rmp->is_deadline = schedproc[parent_nr_n].is_deadline;
++		rmp->deadline = schedproc[parent_nr_n].deadline;
++		rmp->estimate = schedproc[parent_nr_n].estimate;
++		rmp->kill = schedproc[parent_nr_n].kill;
+ 		break;
+ 		
+ 	default: 
+@@ -273,6 +305,9 @@ int do_nice(message *m_ptr)
+ 
+ 	rmp = &schedproc[proc_nr_n];
+ 	new_q = m_ptr->m_pm_sched_scheduling_set_nice.maxprio;
++	if (new_q == DEADLINE_Q) {
++		new_q = DEADLINE_Q - 1;
++	}
+ 	if (new_q >= NR_SCHED_QUEUES) {
+ 		return EINVAL;
+ 	}
+@@ -294,6 +329,60 @@ int do_nice(message *m_ptr)
+ 	return rv;
+ }
+ 
++static int64_t get_now_time() {
++	clock_t ticks, realtime;
++  	time_t boottime;
++  	int s;
++
++	if ((s=getuptime(&ticks, &realtime, &boottime)) != OK)
++  		panic("do_time couldn't get uptime: %d", s);
++
++	return (((int64_t) realtime * 1000) / sys_hz()) + ((int64_t) boottime) * 1000;
++}
++
++
++/*===========================================================================*
++ *				do_sched_deadline					     *
++ *===========================================================================*/
++int do_sched_deadline(message *m_ptr)
++{
++	struct schedproc *rmp;
++	int proc_nr_n;
++	int64_t deadline = m_ptr->m_deadline.deadline;
++	int64_t estimate = m_ptr->m_deadline.estimate;
++	bool kill = m_ptr->m_deadline.kill;
++	int64_t now;
++
++	if (sched_isokendpt(m_ptr->m_deadline.endpoint, &proc_nr_n) != OK) {
++		printf("SCHED: WARNING: got an invalid endpoint in OoQ msg "
++		"%d\n", m_ptr->m_source);
++		return EBADEPT;
++	}
++
++	rmp = &schedproc[proc_nr_n];
++	now = get_now_time();
++
++	if ((deadline < estimate + now && deadline != -1) || estimate <= 0) {
++		return EINVAL;
++	}
++
++	if ((deadline == -1 && !(rmp->is_deadline)) || (deadline != -1 && rmp->is_deadline)) {
++		return EPERM;
++	}
++
++	if (deadline == -1) {
++		rmp->is_deadline = false;
++	} else {
++		rmp->is_deadline = true;
++	}
++
++	rmp->deadline = deadline;
++	rmp->estimate = estimate;
++	rmp->kill = kill;
++
++	return schedule_process_local(rmp);
++}
++
+ /*===========================================================================*
+  *				schedule_process			     *
+  *===========================================================================*/
+@@ -319,8 +408,19 @@ static int schedule_process(struct sched
+ 	else
+ 		new_cpu = -1;
+ 
++	if (new_prio == DEADLINE_Q) {
++		new_prio = DEADLINE_Q - 1;
++	}
++
++	if (rmp->is_deadline) {
++		if (sys_schedule(rmp->endpoint, DEADLINE_Q, new_quantum, new_cpu, rmp->deadline, rmp->estimate) == OK) {
++			return OK;
++		}
++		rmp->is_deadline = false;
++	}
++
+ 	if ((err = sys_schedule(rmp->endpoint, new_prio,
+-		new_quantum, new_cpu)) != OK) {
++		new_quantum, new_cpu, rmp->deadline, rmp->estimate)) != OK) {
+ 		printf("PM: An error occurred when trying to schedule %d: %d\n",
+ 		rmp->endpoint, err);
+ 	}
+@@ -356,8 +456,11 @@ static void balance_queues(minix_timer_t
+ 
+ 	for (proc_nr=0, rmp=schedproc; proc_nr < NR_PROCS; proc_nr++, rmp++) {
+ 		if (rmp->flags & IN_USE) {
+-			if (rmp->priority > rmp->max_priority) {
++			if (rmp->priority > rmp->max_priority && !rmp->is_deadline) {
+ 				rmp->priority -= 1; /* increase priority */
++				if (rmp->priority == DEADLINE_Q) {
++					rmp->priority = DEADLINE_Q - 1;
++				}
+ 				schedule_process_local(rmp);
+ 			}
+ 		}
