@@ -1,0 +1,3 @@
+[submodule "Second year/3_semestr/PizzaApp"]
+	path = Second year/3_semestr/Databases
+	url = git@github.com:zemdam/PizzaApp.git
