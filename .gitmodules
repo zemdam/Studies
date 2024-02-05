@@ -1,3 +1,6 @@
 [submodule "Second year/3_semestr/PizzaApp"]
-	path = Second year/3_semestr/Databases
+	path = Second year/3_semester/Databases
 	url = git@github.com:zemdam/PizzaApp.git
+[submodule "Second year/4_semester/Software engineering"]
+	path = Second year/4_semester/Software engineering
+	url = git@github.com:gitguesser/gitguesser.git
