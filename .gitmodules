@@ -4,3 +4,6 @@
 [submodule "Second year/4_semester/Software engineering"]
 	path = Second year/4_semester/Software engineering
 	url = git@github.com:gitguesser/gitguesser.git
+[submodule "Third year/5_semester/Languages and tools for programming III"]
+	path = Third year/5_semester/Languages and tools for programming III
+	url = git@github.com:zemdam/Sokoban-Haksell.git
