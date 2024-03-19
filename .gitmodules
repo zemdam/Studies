@@ -7,3 +7,6 @@
 [submodule "Third year/5_semester/Languages and tools for programming III"]
 	path = Third year/5_semester/Languages and tools for programming III
 	url = git@github.com:zemdam/Sokoban-Haksell.git
+[submodule "Second year/4_semester/Web applications"]
+	path = Second year/4_semester/Web applications
+	url = git@github.com:zemdam/Web-compiler.git
