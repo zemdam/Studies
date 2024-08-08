@@ -10,3 +10,6 @@
 [submodule "Second year/4_semester/Web applications"]
 	path = Second year/4_semester/Web applications
 	url = git@github.com:zemdam/Web-compiler.git
+[submodule "Third year/6_semester/Programming languages and paradigms/JPP-Interpreter"]
+	path = Third year/6_semester/Programming languages and paradigms/JPP-Interpreter
+	url = https://github.com/zemdam/JPP-Interpreter.git
